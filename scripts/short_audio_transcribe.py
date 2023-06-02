@@ -1,15 +1,18 @@
+# 在这个短音频处理脚本中，新增了一个音频处理方式，如果音频的序号是严格递增的，那么导出的wav文件的内容在相同序号下与导入的音频内容相同
 import whisper
 import os
 import json
 import torchaudio
 import argparse
 import torch
+import re
 
 lang2token = {
-            'zh': "[ZH]",
-            'ja': "[JA]",
-            "en": "[EN]",
-        }
+    'zh': "[ZH]",
+    'ja': "[JA]",
+    "en": "[EN]",
+}
+
 def transcribe_one(audio_path):
     # load audio and pad/trim it to fit 30 seconds
     audio = whisper.load_audio(audio_path)
@@ -29,6 +32,7 @@ def transcribe_one(audio_path):
     # print the recognized text
     print(result.text)
     return lang, result.text
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--languages", default="CJE")
@@ -62,19 +66,42 @@ if __name__ == "__main__":
     target_sr = hps['data']['sampling_rate']
     processed_files = 0
     for speaker in speaker_names:
-        for i, wavfile in enumerate(list(os.walk(parent_dir + speaker))[0][2]):
+        files = list(os.walk(parent_dir + speaker))[0][2]
+        files = sorted(files, key=lambda name: int(re.search(r'\d+', name).group()) if re.search(r'\d+', name) else 0)
+
+        # Check if the files are strictly sorted
+        previous_file_number = None
+        strictly_sorted = True
+        for wavfile in files:
+            match = re.search(r'\d+', wavfile)
+            if match:
+                current_file_number = int(match.group())
+                if previous_file_number is not None and current_file_number != previous_file_number + 1:
+                    strictly_sorted = False
+                    break
+                else:
+                    previous_file_number = current_file_number
+
+        previous_file_number = None
+        for i, wavfile in enumerate(files):
             # try to load file as audio
             if wavfile.startswith("processed_"):
                 continue
             try:
                 wav, sr = torchaudio.load(parent_dir + speaker + "/" + wavfile, frame_offset=0, num_frames=-1, normalize=True,
-                                          channels_first=True)
+                                        channels_first=True)
                 wav = wav.mean(dim=0).unsqueeze(0)
                 if sr != target_sr:
                     wav = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sr)(wav)
                 if wav.shape[1] / sr > 20:
                     print(f"{wavfile} too long, ignoring\n")
-                save_path = parent_dir + speaker + "/" + f"processed_{i}.wav"
+
+                if strictly_sorted:
+                    current_file_number = int(re.search(r'\d+', wavfile).group())
+                else:
+                    current_file_number = i
+
+                save_path = parent_dir + speaker + "/" + f"processed_{current_file_number}.wav"
                 torchaudio.save(save_path, wav, target_sr, channels_first=True)
                 # transcribe text
                 lang, text = transcribe_one(save_path)
@@ -83,21 +110,12 @@ if __name__ == "__main__":
                     continue
                 text = lang2token[lang] + text + lang2token[lang] + "\n"
                 speaker_annos.append(save_path + "|" + speaker + "|" + text)
-                
+                    
                 processed_files += 1
                 print(f"Processed: {processed_files}/{total_files}")
             except:
                 continue
 
-    # # clean annotation
-    # import argparse
-    # import text
-    # from utils import load_filepaths_and_text
-    # for i, line in enumerate(speaker_annos):
-    #     path, sid, txt = line.split("|")
-    #     cleaned_text = text._clean_text(txt, ["cjke_cleaners2"])
-    #     cleaned_text += "\n" if not cleaned_text.endswith("\n") else ""
-    #     speaker_annos[i] = path + "|" + sid + "|" + cleaned_text
     # write into annotation
     if len(speaker_annos) == 0:
         print("Warning: no short audios found, this IS expected if you have only uploaded long audios, videos or video links.")
@@ -105,17 +123,3 @@ if __name__ == "__main__":
     with open("short_character_anno.txt", 'w', encoding='utf-8') as f:
         for line in speaker_annos:
             f.write(line)
-
-    # import json
-    # # generate new config
-    # with open("./configs/finetune_speaker.json", 'r', encoding='utf-8') as f:
-    #     hps = json.load(f)
-    # # modify n_speakers
-    # hps['data']["n_speakers"] = 1000 + len(speaker2id)
-    # # add speaker names
-    # for speaker in speaker_names:
-    #     hps['speakers'][speaker] = speaker2id[speaker]
-    # # save modified config
-    # with open("./configs/modified_finetune_speaker.json", 'w', encoding='utf-8') as f:
-    #     json.dump(hps, f, indent=2)
-    # print("finished")
